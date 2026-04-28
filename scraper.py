@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
+SCRAPINGBEE_API_KEY =os.getenv("SCRAPINGBEE_API_KEY")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",

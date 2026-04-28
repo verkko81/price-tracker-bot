@@ -15,7 +15,7 @@ import os
 #   export BOT_TOKEN="123456:your-token-here"   (Mac/Linux)
 #   set BOT_TOKEN=123456:your-token-here        (Windows)
 # ------------------------------------------------------------------
-BOT_TOKEN ="8734537730:AAG0EUTj9EkBHTBhRVrvBHsad1KvX9fdg2g"
+BOT_TOKEN =os.getenv("BOT_TOKEN")
 
 
 # SQLite database file (created automatically on first run)

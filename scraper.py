@@ -1,9 +1,9 @@
 """
-scraper.py — Downloads a product page and extracts the price + currency.
-Uses normal request first. If price is not found, tries ScrapingBee.
+scraper.py — бесплатный парсер без ScrapingBee.
+Работает через httpx + BeautifulSoup.
+Подходит для обычных интернет-магазинов и Tori.
 """
 
-import os
 import re
 import json
 import asyncio
@@ -13,35 +13,28 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-SCRAPINGBEE_API_KEY =os.getenv("SCRAPINGBEE_API_KEY")
-
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
     "Accept-Language": "fi-FI,fi;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 
-CURRENCY_SYMBOLS = {
-    "€": "EUR",
-    "$": "USD",
-    "£": "GBP",
-    "A$": "AUD",
-    "C$": "CAD",
-    "₺": "TRY",
-    "₹": "INR",
-    "¥": "JPY",
-    "₩": "KRW",
-}
 
+def detect_currency(text: str) -> str:
+    if "€" in text:
+        return "EUR"
+    if "$" in text:
+        return "USD"
+    if "£" in text:
+        return "GBP"
 
-def detect_currency(raw: str) -> str:
-    for symbol, code in CURRENCY_SYMBOLS.items():
-        if symbol in raw:
-            return code
-
-    match = re.search(r"\b(USD|EUR|GBP|CHF|AUD|CAD|JPY|KRW|TRY|INR)\b", raw, re.I)
+    match = re.search(r"\b(EUR|USD|GBP|SEK|NOK|DKK)\b", text, re.I)
     if match:
         return match.group(1).upper()
 
@@ -75,10 +68,7 @@ def parse_price_number(text: str) -> float | None:
         return None
 
 
-def extract_price_from_html(html: str, url: str) -> tuple[float, str] | tuple[None, None]:
-    soup = BeautifulSoup(html, "html.parser")
-
-    # 1. JSON-LD
+def try_json_ld(soup: BeautifulSoup):
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string or "")
@@ -103,24 +93,33 @@ def extract_price_from_html(html: str, url: str) -> tuple[float, str] | tuple[No
                 if isinstance(offers, dict):
                     raw_price = str(offers.get("price", ""))
                     currency = str(offers.get("priceCurrency", "?")).upper()
+
                     price = parse_price_number(raw_price)
 
                     if price:
-                        logger.info(f"[Scraper] Found JSON-LD price: {price} {currency}")
                         return price, currency
 
-    # 2. Meta tags
-    meta_price_names = [
+    return None, None
+
+
+def try_meta_tags(soup: BeautifulSoup):
+    price_names = [
         "product:price:amount",
         "og:price:amount",
         "price",
+        "twitter:data1",
     ]
 
-    for name in meta_price_names:
-        tag = soup.find("meta", attrs={"property": name}) or soup.find("meta", attrs={"name": name})
+    for name in price_names:
+        tag = (
+            soup.find("meta", attrs={"property": name})
+            or soup.find("meta", attrs={"name": name})
+        )
+
         if tag:
             raw = tag.get("content", "")
             price = parse_price_number(raw)
+
             if price:
                 currency = detect_currency(raw)
 
@@ -134,11 +133,13 @@ def extract_price_from_html(html: str, url: str) -> tuple[float, str] | tuple[No
                 if currency_tag and currency_tag.get("content"):
                     currency = currency_tag.get("content").upper()
 
-                logger.info(f"[Scraper] Found meta price: {price} {currency}")
                 return price, currency
 
-    # 3. Common price classes
-    price_pattern = re.compile(r"(price|hinta|current|sale)", re.I)
+    return None, None
+
+
+def try_price_elements(soup: BeautifulSoup):
+    price_pattern = re.compile(r"(price|hinta|amount|current|sale)", re.I)
     skip_pattern = re.compile(r"(old|was|regular|strike|compare|original)", re.I)
 
     for tag in soup.find_all(True):
@@ -149,20 +150,23 @@ def extract_price_from_html(html: str, url: str) -> tuple[float, str] | tuple[No
         if price_pattern.search(combined) and not skip_pattern.search(combined):
             raw = tag.get_text(" ", strip=True)
 
-            if len(raw) > 80:
+            if len(raw) > 100:
                 continue
 
             price = parse_price_number(raw)
+
             if price:
                 currency = detect_currency(raw)
-                logger.info(f"[Scraper] Found CSS price: {price} {currency}")
                 return price, currency
 
-    # 4. Text scan
+    return None, None
+
+
+def try_text_scan(soup: BeautifulSoup):
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
 
-    text = soup.get_text(" ")
+    text = soup.get_text(" ", strip=True)
 
     matches = re.findall(
         r"(€|\$|£)?\s?(\d{1,6}(?:[.,]\d{3})*(?:[.,]\d{2})?)\s?(EUR|USD|GBP)?",
@@ -175,25 +179,28 @@ def extract_price_from_html(html: str, url: str) -> tuple[float, str] | tuple[No
             continue
 
         price = parse_price_number(number)
+
         if price:
             currency = detect_currency(symbol or code)
-            logger.info(f"[Scraper] Found text price: {price} {currency}")
             return price, currency
 
-    logger.warning(f"[Scraper] No price found for {url}")
     return None, None
 
 
-async def fetch_normal(url: str) -> str | None:
+async def fetch_html(url: str) -> str | None:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(headers=HEADERS, timeout=20, follow_redirects=True) as client:
+            async with httpx.AsyncClient(
+                headers=HEADERS,
+                timeout=20,
+                follow_redirects=True,
+            ) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.text
 
         except Exception as e:
-            logger.warning(f"[Scraper] Normal fetch failed {attempt}/{MAX_RETRIES}: {e}")
+            logger.warning(f"[Scraper] Attempt {attempt}/{MAX_RETRIES} failed: {e}")
 
         if attempt < MAX_RETRIES:
             await asyncio.sleep(RETRY_DELAY)
@@ -201,45 +208,28 @@ async def fetch_normal(url: str) -> str | None:
     return None
 
 
-async def fetch_scrapingbee(url: str) -> str | None:
-    if not SCRAPINGBEE_API_KEY:
-        logger.warning("[Scraper] SCRAPINGBEE_API_KEY is missing")
-        return None
-
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.get(
-                "https://app.scrapingbee.com/api/v1/",
-                params={
-                    "api_key": SCRAPINGBEE_API_KEY,
-                    "url": url,
-                    "render_js": "true",
-                    "premium_proxy": "true",
-                    "country_code": "fi",
-                    "wait": "3000",
-                },
-            )
-            response.raise_for_status()
-            return response.text
-
-    except Exception as e:
-        logger.error(f"[Scraper] ScrapingBee failed: {e}")
-        return None
-
-
 async def get_price(url: str) -> tuple[float, str] | tuple[None, None]:
-    html = await fetch_normal(url)
+    html = await fetch_html(url)
 
-    if html:
-        price, currency = extract_price_from_html(html, url)
+    if not html:
+        logger.warning(f"[Scraper] Could not fetch page: {url}")
+        return None, None
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    strategies = [
+        try_json_ld,
+        try_meta_tags,
+        try_price_elements,
+        try_text_scan,
+    ]
+
+    for strategy in strategies:
+        price, currency = strategy(soup)
+
         if price:
+            logger.info(f"[Scraper] Found price: {price} {currency}")
             return price, currency
 
-    logger.info("[Scraper] Trying ScrapingBee...")
-
-    html = await fetch_scrapingbee(url)
-
-    if html:
-        return extract_price_from_html(html, url)
-
+    logger.warning(f"[Scraper] No price found: {url}")
     return None, None

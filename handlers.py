@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command, CommandStart
+import os
 
 from config import MAX_PRODUCTS_PER_USER
 from database import (
@@ -13,6 +14,9 @@ from database import (
 from scraper import get_price
 
 router = Router()
+
+# 👇 берём ADMIN_ID из Railway
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
@@ -110,10 +114,7 @@ async def cmd_start(message: Message):
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
-    await message.answer(
-        "Выбери действие 👇",
-        reply_markup=main_menu
-    )
+    await message.answer("Выбери действие 👇", reply_markup=main_menu)
 
 
 @router.message(Command("track"))
@@ -121,7 +122,7 @@ async def cmd_track(message: Message):
     parts = message.text.split(maxsplit=1)
 
     if len(parts) < 2:
-        await message.answer("❗ Пришли ссылку после команды.\nПример: /track https://example.com/product")
+        await message.answer("❗ Пример: /track https://example.com")
         return
 
     await add_product_by_url(message, parts[1].strip())
@@ -164,21 +165,37 @@ async def cmd_list(message: Message):
 async def cmd_remove(message: Message):
     parts = message.text.split(maxsplit=1)
 
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        await message.answer("❗ Укажи ID товара.\nПример: /remove 3\n\nID можно посмотреть в 📦 Мои товары.")
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("❗ Пример: /remove 3")
         return
 
-    product_id = int(parts[1].strip())
+    product_id = int(parts[1])
 
     user_products = await get_user_products(message.from_user.id)
     owned_ids = {p["id"] for p in user_products}
 
     if product_id not in owned_ids:
-        await message.answer(f"❌ Товар с ID {product_id} не найден.")
+        await message.answer("❌ Не найден")
         return
 
     await delete_product(product_id=product_id, user_id=message.from_user.id)
     await message.answer(f"🗑️ Товар #{product_id} удалён.", reply_markup=main_menu)
+
+
+# 👇 АДМИНКА
+@router.message(Command("admin"))
+async def admin_panel(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Нет доступа")
+        return
+
+    products = await get_user_products(message.from_user.id)
+
+    await message.answer(
+        f"👑 Админ панель\n\n"
+        f"Твои товары: {len(products)}\n"
+        f"ID: {message.from_user.id}"
+    )
 
 
 @router.message(F.text == "🛒 Добавить товар")
@@ -194,27 +211,23 @@ async def button_my_products(message: Message):
 @router.message(F.text == "❓ О боте / Помощь")
 async def button_help(message: Message):
     await message.answer(
-        "❓ <b>Как пользоваться ботом</b>\n\n"
-        "1. Нажми 🛒 Добавить товар\n"
-        "2. Пришли ссылку на товар\n"
-        "3. Я сохраню цену и буду проверять её\n\n"
-        "Команды:\n"
-        "/track ссылка — добавить товар\n"
-        "/list — мои товары\n"
-        "/remove ID — удалить товар",
-        parse_mode="HTML",
+        "❓ Как пользоваться:\n\n"
+        "1. Добавь товар\n"
+        "2. Я слежу за ценой\n"
+        "3. Уведомлю при падении\n\n"
+        "/track ссылка\n/remove ID",
         reply_markup=main_menu
     )
 
 
 @router.message(F.text == "🌍 Язык")
 async def button_language(message: Message):
-    await message.answer("Пока доступен русский язык 🇷🇺")
+    await message.answer("Пока только русский 🇷🇺")
 
 
 @router.message(F.text == "💰 Лента скидок")
 async def button_deals(message: Message):
-    await message.answer("💰 Лента скидок пока в разработке 🚀")
+    await message.answer("🚧 В разработке")
 
 
 @router.message(F.text.startswith("http"))
